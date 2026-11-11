@@ -51,10 +51,17 @@ T["interactive_command"]["loads from setup and joins the agent group"] = functio
     })
     configured_chat.tools:parse(configured_chat, { content = "@{agent}" })
     _G.tool_available = configured_chat.tool_registry.in_use.interactive_command ~= nil
+    for _, message in ipairs(configured_chat.messages) do
+      if message.role == "system" and (message.content or ""):find("<interactive_command_instructions>", 1, true) then
+        _G.agent_instructions = message.content
+      end
+    end
     configured_chat:close()
   ]])
 
   h.eq(true, child.lua_get("_G.tool_available"))
+  h.expect_contains("running tests", child.lua_get("_G.agent_instructions"))
+  h.expect_contains("exit code", child.lua_get("_G.agent_instructions"))
 end
 
 T["interactive_command"]["starts without waiting and returns later output"] = function()
@@ -145,11 +152,16 @@ T["interactive_command"]["sends command output in the next agent request"] = fun
       if message.role == "tool" and message.tools.call_id == "read_command" then
         _G.feedback = message.content
       end
+      if message.role == "system" and (message.content or ""):find("<interactive_command_instructions>", 1, true) then
+        _G.request_instructions = message.content
+      end
     end
   ]])
 
   h.expect_contains("agent-feedback", child.lua_get("_G.feedback"))
   h.expect_contains("exited with code 0", child.lua_get("_G.feedback"))
+  h.expect_contains("running tests", child.lua_get("_G.request_instructions"))
+  h.expect_contains("exit code", child.lua_get("_G.request_instructions"))
 end
 
 T["interactive_command"]["stop terminates a running command"] = function()

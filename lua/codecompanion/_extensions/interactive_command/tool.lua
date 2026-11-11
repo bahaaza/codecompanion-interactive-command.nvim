@@ -250,11 +250,20 @@ return {
       return execute_command({ chat = self.chat, args = args, output_cb = opts.output_cb })
     end,
   },
+  system_prompt = [[<interactive_command_instructions>
+Use interactive_command for running tests and test suites, builds, package installs, dev servers, and commands that need live output or interactive input.
+Start the command and keep its job_id. Continue independent work while it runs.
+Read output with wait_ms between 1000 and 30000. For finite commands, keep reading until you receive the exit code and inspect any failures.
+If a read has no new output and the command is still running, keep using the same job_id rather than starting another copy.
+Report tests as passed only after reading a successful exit code. Starting a process or seeing partial output does not establish the result.
+Use send to answer program prompts, including a newline to press Enter. Ask the user for an answer you cannot determine.
+Read final output before release. Stop processes that are no longer needed, and release them when done.
+</interactive_command_instructions>]],
   schema = {
     type = "function",
     ["function"] = {
       name = "interactive_command",
-      description = "Run a long-lived command in a visible terminal without waiting for it to exit. Start returns a command ID immediately. Read returns new output and exit status, optionally waiting up to 30 seconds. Send writes input to the terminal; include a newline when pressing Enter. Stop terminates the command; release stops it and removes its saved output. Use this instead of run_command for interactive or long-running processes.",
+      description = "Run a long-lived command in a visible terminal without waiting for it to exit. Start returns a command ID immediately. Read returns new output and exit status, optionally waiting up to 30 seconds. Send writes input to the terminal; include a newline when pressing Enter. Stop terminates the command; release stops it and removes its saved output. Use this for running tests, builds, package installs, dev servers, and interactive or long-running processes.",
       parameters = {
         type = "object",
         properties = {
