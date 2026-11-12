@@ -192,6 +192,61 @@ local function send_input(opts)
   return { status = "success", data = fmt("Sent input to command %d.", job.id) }
 end
 
+---@param opts { buffer: number }
+---@return boolean|nil
+local function close_terminal(opts)
+  if not vim.api.nvim_buf_is_valid(opts.buffer) then
+    return true
+  end
+  local ok, error_message = pcall(function()
+    local normal_windows = 0
+    for _, window in ipairs(vim.api.nvim_list_wins()) do
+      if vim.api.nvim_win_get_config(window).relative == "" then
+        normal_windows = normal_windows + 1
+      end
+    end
+    for _, window in ipairs(vim.fn.win_findbuf(opts.buffer)) do
+      local is_float = vim.api.nvim_win_get_config(window).relative ~= ""
+      if is_float or normal_windows > 1 then
+        vim.api.nvim_win_close(window, true)
+        if not is_float then
+          normal_windows = normal_windows - 1
+        end
+      end
+    end
+    vim.api.nvim_buf_delete(opts.buffer, { force = true })
+  end)
+  if not ok then
+    log:error("Could not close interactive command terminal: %s", error_message)
+    return nil
+  end
+  return true
+end
+
+---@param opts { chat: CodeCompanion.Chat, job: table, action: string }
+---@return table
+local function release_command(opts)
+  local job = opts.job
+  if opts.action == "close" and not job.exit_code then
+    return {
+      status = "error",
+      data = fmt("Command %d is still running. Stop it and read its final output before closing.", job.id),
+    }
+  end
+  if not job.exit_code then
+    job.stopping = true
+    vim.fn.jobstop(job.id)
+  end
+  local output = read_output({ job = job })
+  if not close_terminal({ buffer = job.buffer }) then
+    return { status = "error", data = "Could not close the terminal.\n" .. output }
+  end
+  jobs_by_chat[opts.chat.bufnr][job.id] = nil
+  local message = opts.action == "close" and fmt("Closed terminal for command %d.", job.id)
+    or fmt("Released command %d and closed its terminal.", job.id)
+  return { status = "success", data = message .. "\n" .. output }
+end
+
 ---@param opts { chat: CodeCompanion.Chat, args: table, output_cb: fun(response: table) }
 ---@return table|nil
 local function execute_command(opts)
@@ -228,14 +283,10 @@ local function execute_command(opts)
     end
     return { status = "success", data = fmt("Stopping command %d. Use read to get its final output.", job.id) }
   end
-  if args.action == "release" then
-    if not job.exit_code then
-      vim.fn.jobstop(job.id)
-    end
-    jobs_by_chat[opts.chat.bufnr][job.id] = nil
-    return { status = "success", data = fmt("Released command %d.", job.id) }
+  if args.action == "close" or args.action == "release" then
+    return release_command({ chat = opts.chat, job = job, action = args.action })
   end
-  return { status = "error", data = "Action must be start, read, send, stop, or release" }
+  return { status = "error", data = "Action must be start, read, send, stop, close, or release" }
 end
 
 ---@class CodeCompanion.Tool.InteractiveCommand: CodeCompanion.Tools.Tool
@@ -257,19 +308,23 @@ Read output with wait_ms between 1000 and 30000. For finite commands, keep readi
 If a read has no new output and the command is still running, keep using the same job_id rather than starting another copy.
 Report tests as passed only after reading a successful exit code. Starting a process or seeing partial output does not establish the result.
 Use send to answer program prompts, including a newline to press Enter. Ask the user for an answer you cannot determine.
-Read final output before release. Stop processes that are no longer needed, and release them when done.
+After a command exits, read its final output and use close to remove its terminal split and buffer when no longer needed. Do this after tests and other finite commands to avoid accumulating terminals.
+Use stop to terminate a command while retaining its output. Use release to stop a command, close its terminal, and discard the saved job when done.
 </interactive_command_instructions>]],
   schema = {
     type = "function",
     ["function"] = {
       name = "interactive_command",
-      description = "Run a long-lived command in a visible terminal without waiting for it to exit. Start returns a command ID immediately. Read returns new output and exit status, optionally waiting up to 30 seconds. Send writes input to the terminal; include a newline when pressing Enter. Stop terminates the command; release stops it and removes its saved output. Use this for running tests, builds, package installs, dev servers, and interactive or long-running processes.",
+      description = "Run a long-lived command in a visible terminal without waiting for it to exit. Start returns a command ID immediately. Read returns new output and exit status, optionally waiting up to 30 seconds. Send writes input to the terminal; include a newline when pressing Enter. Stop terminates the command. Close removes a finished command's terminal split and buffer and releases the job. Release also stops a running command and closes its terminal. Close terminals after reading final output when no longer needed. Use this for running tests, builds, package installs, dev servers, and interactive or long-running processes.",
       parameters = {
         type = "object",
         properties = {
-          action = { type = "string", enum = { "start", "read", "send", "stop", "release" } },
+          action = { type = "string", enum = { "start", "read", "send", "stop", "close", "release" } },
           command = { type = "string", description = "Shell command for start" },
-          job_id = { type = "integer", description = "Command ID returned by start for read, send, stop, or release" },
+          job_id = {
+            type = "integer",
+            description = "Command ID returned by start for read, send, stop, close, or release",
+          },
           input = { type = "string", description = "Text to send to the terminal for send" },
           wait_ms = { type = "integer", description = "Maximum wait in milliseconds for read, up to 30000" },
         },

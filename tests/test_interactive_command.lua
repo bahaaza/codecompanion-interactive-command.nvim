@@ -62,6 +62,32 @@ T["interactive_command"]["loads from setup and joins the agent group"] = functio
   h.eq(true, child.lua_get("_G.tool_available"))
   h.expect_contains("running tests", child.lua_get("_G.agent_instructions"))
   h.expect_contains("exit code", child.lua_get("_G.agent_instructions"))
+  h.expect_contains("use close", child.lua_get("_G.agent_instructions"))
+end
+
+T["interactive_command"]["preloads the tool as visible chat context"] = function()
+  child.lua([[
+    h.setup_plugin(vim.tbl_deep_extend("force", vim.deepcopy(require("tests.config")), {
+      extensions = { interactive_command = {} },
+      interactions = { chat = { tools = { opts = { default_tools = { "interactive_command", "agent" } } } } },
+    }))
+    local configured_chat = require("codecompanion.interactions.chat").new({
+      buffer_context = { bufnr = 1, filetype = "lua" },
+      adapter = "test_adapter",
+    })
+    _G.context_visible = false
+    for _, item in ipairs(configured_chat.context_items) do
+      if item.id == "<tool>interactive_command</tool>" and item.opts.visible then
+        _G.context_visible = true
+      end
+    end
+    local schema = configured_chat.tool_registry.schemas["<tool>interactive_command</tool>"]
+    _G.close_available = vim.tbl_contains(schema["function"].parameters.properties.action.enum, "close")
+    configured_chat:close()
+  ]])
+
+  h.eq(true, child.lua_get("_G.context_visible"))
+  h.eq(true, child.lua_get("_G.close_available"))
 end
 
 T["interactive_command"]["starts without waiting and returns later output"] = function()
@@ -213,6 +239,56 @@ T["interactive_command"]["chat close terminates a background command"] = functio
   h.eq(0, child.lua_get("vim.fn.filereadable(_G.marker)"))
 end
 
+T["interactive_command"]["closes a finished terminal and preserves other commands"] = function()
+  if vim.fn.has("win32") == 1 then
+    MiniTest.skip("This test uses POSIX shell commands")
+  end
+
+  child.lua([[
+    local first = _G.call_interactive_command({ action = "start", command = "printf first-result" })
+    local second = _G.call_interactive_command({ action = "start", command = "printf second-result" })
+    local first_id = tonumber(first:match("Started command (%d+)"))
+    local second_id = tonumber(second:match("Started command (%d+)"))
+    _G.first_buffer = tonumber(first:match("terminal buffer (%d+)"))
+    _G.second_buffer = tonumber(second:match("terminal buffer (%d+)"))
+    _G.first_window = vim.fn.win_findbuf(_G.first_buffer)[1]
+    _G.second_window = vim.fn.win_findbuf(_G.second_buffer)[1]
+    vim.fn.jobwait({ first_id, second_id }, 3000)
+    _G.closed = _G.call_interactive_command({ action = "close", job_id = first_id })
+    _G.remaining_output = _G.call_interactive_command({ action = "read", job_id = second_id, wait_ms = 2000 })
+  ]])
+
+  h.expect_contains("Closed terminal", child.lua_get("_G.closed"))
+  h.expect_contains("first-result", child.lua_get("_G.closed"))
+  h.eq(false, child.lua_get("vim.api.nvim_buf_is_valid(_G.first_buffer)"))
+  h.eq(false, child.lua_get("vim.api.nvim_win_is_valid(_G.first_window)"))
+  h.eq(true, child.lua_get("vim.api.nvim_buf_is_valid(_G.second_buffer)"))
+  h.eq(true, child.lua_get("vim.api.nvim_win_is_valid(_G.second_window)"))
+  h.expect_contains("second-result", child.lua_get("_G.remaining_output"))
+end
+
+T["interactive_command"]["keeps a running terminal open until the command finishes"] = function()
+  if vim.fn.has("win32") == 1 then
+    MiniTest.skip("This test uses POSIX shell commands")
+  end
+
+  child.lua([[
+    local started = _G.call_interactive_command({
+      action = "start",
+      command = "read answer; printf 'done:%s' \"$answer\"",
+    })
+    local job_id = tonumber(started:match("Started command (%d+)"))
+    _G.refused_close = _G.call_interactive_command({ action = "close", job_id = job_id })
+    _G.call_interactive_command({ action = "send", job_id = job_id, input = "kept\n" })
+    vim.fn.jobwait({ job_id }, 3000)
+    _G.finished_close = _G.call_interactive_command({ action = "close", job_id = job_id })
+  ]])
+
+  h.expect_contains("still running", child.lua_get("_G.refused_close"))
+  h.expect_contains("Closed terminal", child.lua_get("_G.finished_close"))
+  h.expect_contains("done:kept", child.lua_get("_G.finished_close"))
+end
+
 T["interactive_command"]["a cancelled read preserves later output"] = function()
   if vim.fn.has("win32") == 1 then
     MiniTest.skip("This test uses POSIX shell commands")
@@ -299,6 +375,7 @@ T["interactive_command"]["approves execution and input and releases a running co
     end
     local started = _G.call_interactive_command({ action = "start", command = "read answer; sleep 30" })
     _G.job_id = tonumber(started:match("Started command (%d+)"))
+    _G.terminal_buffer = tonumber(started:match("terminal buffer (%d+)"))
     _G.call_interactive_command({ action = "send", job_id = _G.job_id, input = "hello\n" })
     _G.call_interactive_command({ action = "read", job_id = _G.job_id })
     _G.released = _G.call_interactive_command({ action = "release", job_id = _G.job_id })
@@ -310,6 +387,7 @@ T["interactive_command"]["approves execution and input and releases a running co
   h.eq(2, child.lua_get("_G.approval_count"))
   h.expect_contains("Released command", child.lua_get("_G.released"))
   h.eq(false, child.lua_get("vim.fn.jobwait({ _G.job_id }, 0)[1] == -1"))
+  h.eq(false, child.lua_get("vim.api.nvim_buf_is_valid(_G.terminal_buffer)"))
 end
 
 return T
