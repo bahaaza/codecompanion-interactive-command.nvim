@@ -273,15 +273,18 @@ T["interactive_command"]["closes a finished terminal and preserves other command
 
   child.lua([[
     local first = _G.call_interactive_command({ action = "start", command = "printf first-result" })
-    local second = _G.call_interactive_command({ action = "start", command = "printf second-result" })
+    local second = _G.call_interactive_command({ action = "start", command = "read answer; printf second-result" })
     local first_id = tonumber(first:match("Started command (%d+)"))
     local second_id = tonumber(second:match("Started command (%d+)"))
     _G.first_buffer = tonumber(first:match("terminal buffer (%d+)"))
     _G.second_buffer = tonumber(second:match("terminal buffer (%d+)"))
     _G.first_window = vim.fn.win_findbuf(_G.first_buffer)[1]
     _G.second_window = vim.fn.win_findbuf(_G.second_buffer)[1]
-    vim.fn.jobwait({ first_id, second_id }, 3000)
+    vim.fn.jobwait({ first_id }, 3000)
     _G.closed = _G.call_interactive_command({ action = "close", job_id = first_id })
+    _G.second_still_open = vim.api.nvim_buf_is_valid(_G.second_buffer) and vim.api.nvim_win_is_valid(_G.second_window)
+    _G.call_interactive_command({ action = "send", job_id = second_id, input = "go\n" })
+    vim.fn.jobwait({ second_id }, 3000)
     _G.remaining_output = _G.call_interactive_command({ action = "read", job_id = second_id, wait_ms = 2000 })
   ]])
 
@@ -289,9 +292,24 @@ T["interactive_command"]["closes a finished terminal and preserves other command
   h.expect_contains("first-result", child.lua_get("_G.closed"))
   h.eq(false, child.lua_get("vim.api.nvim_buf_is_valid(_G.first_buffer)"))
   h.eq(false, child.lua_get("vim.api.nvim_win_is_valid(_G.first_window)"))
-  h.eq(true, child.lua_get("vim.api.nvim_buf_is_valid(_G.second_buffer)"))
-  h.eq(true, child.lua_get("vim.api.nvim_win_is_valid(_G.second_window)"))
+  h.eq(true, child.lua_get("_G.second_still_open"))
   h.expect_contains("second-result", child.lua_get("_G.remaining_output"))
+end
+
+T["interactive_command"]["automatically closes finished terminals and preserves unread output"] = function()
+  child.lua([[
+    local started = _G.call_interactive_command({ action = "start", command = "printf saved-output; exit 7" })
+    local id = tonumber(started:match("Started command (%d+)"))
+    _G.finished_buffer = tonumber(started:match("terminal buffer (%d+)"))
+    _G.finished_window = vim.fn.win_findbuf(_G.finished_buffer)[1]
+    vim.fn.jobwait({ id }, 3000)
+    _G.auto_closed = vim.wait(2000, function() return not vim.api.nvim_buf_is_valid(_G.finished_buffer) end)
+    _G.saved_output = _G.call_interactive_command({ action = "read", job_id = id })
+  ]])
+  h.eq(true, child.lua_get("_G.auto_closed"))
+  h.eq(false, child.lua_get("vim.api.nvim_win_is_valid(_G.finished_window)"))
+  h.expect_contains("saved-output", child.lua_get("_G.saved_output"))
+  h.expect_contains("exited with code 7", child.lua_get("_G.saved_output"))
 end
 
 T["interactive_command"]["keeps a running terminal open until the command finishes"] = function()

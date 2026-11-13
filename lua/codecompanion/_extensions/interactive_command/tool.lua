@@ -7,6 +7,7 @@ local fmt = string.format
 local MAX_OUTPUT_BYTES = 1048576
 local MAX_READ_BYTES = 16384
 local jobs_by_chat = {}
+local close_terminal
 
 ---@param opts { output: string, offset: number }
 ---@return number
@@ -133,6 +134,9 @@ local function start_command(opts)
       end,
       on_exit = function(_, exit_code)
         job.exit_code = exit_code
+        vim.schedule(function()
+          close_terminal({ buffer = job.buffer })
+        end)
       end,
     })
   end)
@@ -198,7 +202,7 @@ end
 
 ---@param opts { buffer: number }
 ---@return boolean|nil
-local function close_terminal(opts)
+close_terminal = function(opts)
   if not vim.api.nvim_buf_is_valid(opts.buffer) then
     return true
   end
@@ -338,14 +342,14 @@ For live test progress, use a runner's streaming mode when available. Piping thr
 If a read has no new output and the command is still running, keep using the same job_id rather than starting another copy.
 Report tests as passed only after reading a successful exit code. Starting a process or seeing partial output does not establish the result.
 Use send to answer program prompts, including a newline to press Enter. Ask the user for an answer you cannot determine.
-After a command exits, read its final output and use close to remove its terminal split and buffer when no longer needed. Do this after tests and other finite commands to avoid accumulating terminals.
+Finished terminals close automatically. Read the final output and exit code after a command exits; use close to release its saved job when no longer needed.
 Use stop to terminate a command while retaining its output. Use release to stop a command, close its terminal, and discard the saved job when done.
 </interactive_command_instructions>]],
   schema = {
     type = "function",
     ["function"] = {
       name = "interactive_command",
-      description = "Run a long-lived command in a visible terminal without waiting for it to exit. Start returns a command ID immediately. Read returns new output and exit status, optionally waiting up to 30 seconds. Send writes input to the terminal; include a newline when pressing Enter. Stop terminates the command. Close removes a finished command's terminal split and buffer and releases the job. Release also stops a running command and closes its terminal. Close terminals after reading final output when no longer needed. Use this for running tests, builds, package installs, dev servers, and interactive or long-running processes.",
+      description = "Run a long-lived command in a visible terminal without waiting for it to exit. Start returns a command ID immediately. Read returns new output and exit status, optionally waiting up to 30 seconds. Send writes input to the terminal; include a newline when pressing Enter. Stop terminates the command. Finished terminals close automatically while output remains available to read. Close releases a finished job. Release also stops a running command and closes its terminal. Use this for running tests, builds, package installs, dev servers, and interactive or long-running processes.",
       parameters = {
         type = "object",
         properties = {
