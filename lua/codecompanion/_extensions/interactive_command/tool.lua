@@ -6,6 +6,7 @@ local fmt = string.format
 
 local MAX_OUTPUT_BYTES = 1048576
 local MAX_READ_BYTES = 16384
+local DEFAULT_CLOSE_DELAY_MS = 2000
 local jobs_by_chat = {}
 local close_terminal
 
@@ -119,7 +120,7 @@ local function register_chat(chat)
   end)
 end
 
----@param opts { chat: CodeCompanion.Chat, command: string }
+---@param opts { chat: CodeCompanion.Chat, command: string, close_delay_ms: integer }
 ---@return table|nil
 local function start_command(opts)
   local buffer = vim.api.nvim_create_buf(false, true)
@@ -134,9 +135,9 @@ local function start_command(opts)
       end,
       on_exit = function(_, exit_code)
         job.exit_code = exit_code
-        vim.schedule(function()
+        vim.defer_fn(function()
           close_terminal({ buffer = job.buffer })
-        end)
+        end, opts.close_delay_ms)
       end,
     })
   end)
@@ -157,6 +158,8 @@ local function start_command(opts)
 
   -- Preserve the current height during split equalization, including after manual resizing.
   vim.wo[window].winfixheight = true
+  local command_label = opts.command:gsub("%c", " "):gsub("%%", "%%%%")
+  vim.wo[window][0].winbar = "$ " .. command_label
 
   register_chat(opts.chat)
   jobs_by_chat[opts.chat.bufnr][id] = job
@@ -283,7 +286,7 @@ local function release_command(opts)
   vim.defer_fn(check_exit, 25)
 end
 
----@param opts { chat: CodeCompanion.Chat, args: table, output_cb: fun(response: table) }
+---@param opts { chat: CodeCompanion.Chat, args: table, close_delay_ms: integer, output_cb: fun(response: table) }
 ---@return table|nil
 local function execute_command(opts)
   local args = opts.args
@@ -291,7 +294,7 @@ local function execute_command(opts)
     if type(args.command) ~= "string" or vim.trim(args.command) == "" then
       return { status = "error", data = "A command is required to start a process" }
     end
-    local job = start_command({ chat = opts.chat, command = args.command })
+    local job = start_command({ chat = opts.chat, command = args.command, close_delay_ms = opts.close_delay_ms })
     if not job then
       return { status = "error", data = "Could not start the command" }
     end
@@ -334,7 +337,12 @@ return {
     ---@param args table
     ---@param opts { output_cb: fun(response: table) }
     function(self, args, opts)
-      return execute_command({ chat = self.chat, args = args, output_cb = opts.output_cb })
+      return execute_command({
+        chat = self.chat,
+        args = args,
+        close_delay_ms = self.opts and self.opts.close_delay_ms or DEFAULT_CLOSE_DELAY_MS,
+        output_cb = opts.output_cb,
+      })
     end,
   },
   system_prompt = [[<interactive_command_instructions>
@@ -345,7 +353,7 @@ For live test progress, use a runner's streaming mode when available. Piping thr
 If a read has no new output and the command is still running, keep using the same job_id rather than starting another copy.
 Report tests as passed only after reading a successful exit code. Starting a process or seeing partial output does not establish the result.
 Use send to answer program prompts, including a newline to press Enter. Ask the user for an answer you cannot determine.
-Finished terminals close automatically. Read the final output and exit code after a command exits; use close to release its saved job when no longer needed.
+Finished terminals close automatically after a brief delay so the user can see the final output. Read the final output and exit code after a command exits. Let automatic cleanup close the split unless the user wants it closed immediately.
 Use stop to terminate a command while retaining its output. Use release to stop a command, close its terminal, and discard the saved job when done.
 </interactive_command_instructions>]],
   schema = {

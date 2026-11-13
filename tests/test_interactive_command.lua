@@ -62,7 +62,7 @@ T["interactive_command"]["loads from setup and joins the agent group"] = functio
   h.eq(true, child.lua_get("_G.tool_available"))
   h.expect_contains("running tests", child.lua_get("_G.agent_instructions"))
   h.expect_contains("exit code", child.lua_get("_G.agent_instructions"))
-  h.expect_contains("use close", child.lua_get("_G.agent_instructions"))
+  h.expect_contains("Let automatic cleanup close the split", child.lua_get("_G.agent_instructions"))
 end
 
 T["interactive_command"]["preloads the tool as visible chat context"] = function()
@@ -303,9 +303,11 @@ T["interactive_command"]["automatically closes finished terminals and preserves 
     _G.finished_buffer = tonumber(started:match("terminal buffer (%d+)"))
     _G.finished_window = vim.fn.win_findbuf(_G.finished_buffer)[1]
     vim.fn.jobwait({ id }, 3000)
-    _G.auto_closed = vim.wait(2000, function() return not vim.api.nvim_buf_is_valid(_G.finished_buffer) end)
     _G.saved_output = _G.call_interactive_command({ action = "read", job_id = id })
+    _G.open_after_exit = vim.api.nvim_win_is_valid(_G.finished_window)
+    _G.auto_closed = vim.wait(3000, function() return not vim.api.nvim_buf_is_valid(_G.finished_buffer) end)
   ]])
+  h.eq(true, child.lua_get("_G.open_after_exit"))
   h.eq(true, child.lua_get("_G.auto_closed"))
   h.eq(false, child.lua_get("vim.api.nvim_win_is_valid(_G.finished_window)"))
   h.expect_contains("saved-output", child.lua_get("_G.saved_output"))
