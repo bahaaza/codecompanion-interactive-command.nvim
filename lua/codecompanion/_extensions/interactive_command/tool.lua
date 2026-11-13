@@ -155,6 +155,9 @@ local function start_command(opts)
     return nil
   end
 
+  -- Preserve the current height during split equalization, including after manual resizing.
+  vim.wo[window].winfixheight = true
+
   register_chat(opts.chat)
   jobs_by_chat[opts.chat.bufnr][id] = job
   return job

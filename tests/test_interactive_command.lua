@@ -334,6 +334,33 @@ T["interactive_command"]["keeps a running terminal open until the command finish
   h.expect_contains("done:kept", child.lua_get("_G.finished_close"))
 end
 
+T["interactive_command"]["preserves a manually resized terminal when splits are equalized"] = function()
+  if vim.fn.has("win32") == 1 then
+    MiniTest.skip("This test uses POSIX shell commands")
+  end
+
+  local heights = child.lua_get([[(function()
+    vim.o.lines = 55
+    vim.o.equalalways = true
+    local function start()
+      local result = _G.call_interactive_command({ action = "start", command = "read answer" })
+      return tonumber(result:match("Started command (%d+)")), tonumber(result:match("terminal buffer (%d+)"))
+    end
+    local _, first_buffer = start()
+    local second_id, second_buffer = start()
+    local first_window = vim.fn.win_findbuf(first_buffer)[1]
+    vim.api.nvim_win_set_height(first_window, 17)
+    local initial = vim.api.nvim_win_get_height(first_window)
+
+    _G.call_interactive_command({ action = "send", job_id = second_id, input = "done\n" })
+    assert(vim.wait(3000, function() return not vim.api.nvim_buf_is_valid(second_buffer) end))
+    local after_close = vim.api.nvim_win_get_height(first_window)
+    vim.cmd("wincmd =")
+    return { initial, after_close, vim.api.nvim_win_get_height(first_window) }
+  end)()]])
+  h.eq({ 17, 17, 17 }, heights)
+end
+
 T["interactive_command"]["a cancelled read preserves later output"] = function()
   if vim.fn.has("win32") == 1 then
     MiniTest.skip("This test uses POSIX shell commands")
