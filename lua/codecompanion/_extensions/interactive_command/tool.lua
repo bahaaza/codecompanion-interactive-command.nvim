@@ -56,7 +56,7 @@ local function clean_output(opts)
   return output
 end
 
----@param opts { job: table }
+---@param opts { job: table, wait_timeout_ms?: number }
 ---@return string
 local function read_output(opts)
   local job = opts.job
@@ -79,6 +79,8 @@ local function read_output(opts)
   end
   if output ~= "" then
     message = message .. "\n" .. markdown.form_codeblock(output)
+  elseif opts.wait_timeout_ms then
+    message = message .. fmt(" No new output during the %dms read wait.", opts.wait_timeout_ms)
   else
     message = message .. " No new output."
   end
@@ -157,17 +159,19 @@ end
 ---@param opts { chat: CodeCompanion.Chat, job: table, wait_ms?: number, output_cb: fun(response: table) }
 local function wait_for_output(opts)
   local orchestrator = opts.chat.tool_orchestrator
-  local deadline = vim.uv.now() + math.min(math.max(opts.wait_ms or 0, 0), 30000)
+  local wait_ms = math.min(math.max(opts.wait_ms or 0, 0), 30000)
+  local deadline = vim.uv.now() + wait_ms
   local function check()
     if orchestrator and orchestrator.cancelled then
       return
     end
-    if
-      opts.job.read_offset < opts.job.output_start + #opts.job.output
-      or opts.job.exit_code
-      or vim.uv.now() >= deadline
-    then
-      return opts.output_cb({ status = "success", data = read_output({ job = opts.job }) })
+    local has_output = opts.job.read_offset < opts.job.output_start + #opts.job.output
+    if has_output or opts.job.exit_code or vim.uv.now() >= deadline then
+      local wait_timeout_ms = not has_output and not opts.job.exit_code and wait_ms > 0 and wait_ms or nil
+      return opts.output_cb({
+        status = "success",
+        data = read_output({ job = opts.job, wait_timeout_ms = wait_timeout_ms }),
+      })
     end
     vim.defer_fn(check, 100)
   end
@@ -225,26 +229,51 @@ end
 
 ---@param opts { chat: CodeCompanion.Chat, job: table, action: string }
 ---@return table
+local function finish_release(opts)
+  local job = opts.job
+  local output = read_output({ job = job })
+  if not close_terminal({ buffer = job.buffer }) then
+    return { status = "error", data = "Could not close the terminal.\n" .. output }
+  end
+  local jobs = jobs_by_chat[opts.chat.bufnr]
+  if jobs then
+    jobs[job.id] = nil
+  end
+  local message = opts.action == "close" and fmt("Closed terminal for command %d.", job.id)
+    or fmt("Released command %d and closed its terminal.", job.id)
+  return { status = "success", data = message .. "\n" .. output }
+end
+
+---@param opts { chat: CodeCompanion.Chat, job: table, action: string, output_cb: fun(response: table) }
+---@return table|nil
 local function release_command(opts)
   local job = opts.job
-  if opts.action == "close" and not job.exit_code then
+  if job.exit_code then
+    return finish_release(opts)
+  end
+  if opts.action == "close" then
     return {
       status = "error",
       data = fmt("Command %d is still running. Stop it and read its final output before closing.", job.id),
     }
   end
-  if not job.exit_code then
-    job.stopping = true
-    vim.fn.jobstop(job.id)
+  job.stopping = true
+  vim.fn.jobstop(job.id)
+  local deadline = vim.uv.hrtime() + 5e9
+  local function check_exit()
+    if job.exit_code then
+      return opts.output_cb(finish_release(opts))
+    end
+    if vim.uv.hrtime() >= deadline then
+      return opts.output_cb({
+        status = "error",
+        data = fmt("Command %d has not exited after the stop request. Its terminal is still open.", job.id),
+      })
+    end
+    vim.defer_fn(check_exit, 25)
   end
-  local output = read_output({ job = job })
-  if not close_terminal({ buffer = job.buffer }) then
-    return { status = "error", data = "Could not close the terminal.\n" .. output }
-  end
-  jobs_by_chat[opts.chat.bufnr][job.id] = nil
-  local message = opts.action == "close" and fmt("Closed terminal for command %d.", job.id)
-    or fmt("Released command %d and closed its terminal.", job.id)
-  return { status = "success", data = message .. "\n" .. output }
+  -- Closing a live terminal can spin Neovim's delayed-free queue inside a nested wait.
+  vim.defer_fn(check_exit, 25)
 end
 
 ---@param opts { chat: CodeCompanion.Chat, args: table, output_cb: fun(response: table) }
@@ -284,7 +313,7 @@ local function execute_command(opts)
     return { status = "success", data = fmt("Stopping command %d. Use read to get its final output.", job.id) }
   end
   if args.action == "close" or args.action == "release" then
-    return release_command({ chat = opts.chat, job = job, action = args.action })
+    return release_command({ chat = opts.chat, job = job, action = args.action, output_cb = opts.output_cb })
   end
   return { status = "error", data = "Action must be start, read, send, stop, close, or release" }
 end
@@ -304,7 +333,8 @@ return {
   system_prompt = [[<interactive_command_instructions>
 Use interactive_command for running tests and test suites, builds, package installs, dev servers, and commands that need live output or interactive input.
 Start the command and keep its job_id. Continue independent work while it runs.
-Read output with wait_ms between 1000 and 30000. For finite commands, keep reading until you receive the exit code and inspect any failures.
+Prefer read with wait_ms=1000 for progress, increasing to 5000 for quiet commands. A read wait ending does not stop the command. For finite commands, keep reading until you receive the exit code and inspect any failures.
+For live test progress, use a runner's streaming mode when available. Piping through tail hides output until the producer exits; a dependency-ready message does not mean the tests have finished.
 If a read has no new output and the command is still running, keep using the same job_id rather than starting another copy.
 Report tests as passed only after reading a successful exit code. Starting a process or seeing partial output does not establish the result.
 Use send to answer program prompts, including a newline to press Enter. Ask the user for an answer you cannot determine.
@@ -343,6 +373,9 @@ Use stop to terminate a command while retaining its output. Use release to stop 
       end
       if args.action == "send" then
         return fmt("send %q to command %s", args.input or "", tostring(args.job_id))
+      end
+      if args.action == "read" then
+        return fmt("read command %s (wait up to %dms)", tostring(args.job_id), args.wait_ms or 0)
       end
       return fmt("%s command %s", args.action or "interactive", tostring(args.job_id))
     end,

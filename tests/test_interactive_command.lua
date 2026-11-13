@@ -96,7 +96,7 @@ T["interactive_command"]["starts without waiting and returns later output"] = fu
   end
 
   local started = child.lua_get(
-    [[_G.call_interactive_command({ action = "start", command = "printf first; sleep 0.5; printf second" })]]
+    [[_G.call_interactive_command({ action = "start", command = "stty -echo; printf first; read answer; printf second" })]]
   )
   local job_id = tonumber(started:match("Started command (%d+)"))
   h.eq(true, job_id ~= nil)
@@ -106,6 +106,8 @@ T["interactive_command"]["starts without waiting and returns later output"] = fu
     string.format([[_G.call_interactive_command({ action = "read", job_id = %d, wait_ms = 2000 })]], job_id)
   )
   h.expect_contains("first", first)
+
+  child.lua(string.format([[_G.call_interactive_command({ action = "send", job_id = %d, input = "\n" })]], job_id))
 
   local second = child.lua_get(
     string.format([[_G.call_interactive_command({ action = "read", job_id = %d, wait_ms = 2000 })]], job_id)
@@ -146,6 +148,31 @@ T["interactive_command"]["sends terminal input and reports the response"] = func
     "received:hello",
     child.lua_get(string.format("table.concat(vim.api.nvim_buf_get_lines(%d, 0, -1, false), '\\n')", terminal_buffer))
   )
+end
+
+T["interactive_command"]["returns when a quiet running command reaches the read timeout"] = function()
+  if vim.fn.has("win32") == 1 then
+    MiniTest.skip("This test uses POSIX shell commands")
+  end
+
+  child.lua([[
+    local started = _G.call_interactive_command({
+      action = "start", command = "printf 'redis already running\\n'; read answer",
+    })
+    _G.job_id = tonumber(started:match("Started command (%d+)"))
+    _G.initial_output = _G.call_interactive_command({ action = "read", job_id = _G.job_id, wait_ms = 2000 })
+    local started_wait = vim.uv.hrtime()
+    _G.quiet_output = _G.call_interactive_command({ action = "read", job_id = _G.job_id, wait_ms = 200 })
+    _G.elapsed_ms = (vim.uv.hrtime() - started_wait) / 1e6
+    _G.still_running = vim.fn.jobwait({ _G.job_id }, 0)[1] == -1
+    _G.call_interactive_command({ action = "release", job_id = _G.job_id })
+  ]])
+
+  h.expect_contains("redis already running", child.lua_get("_G.initial_output"))
+  h.expect_contains("No new output", child.lua_get("_G.quiet_output"))
+  h.expect_contains("200ms read wait", child.lua_get("_G.quiet_output"))
+  h.eq(true, child.lua_get("_G.elapsed_ms < 1500"))
+  h.eq(true, child.lua_get("_G.still_running"))
 end
 
 T["interactive_command"]["sends command output in the next agent request"] = function()
@@ -375,18 +402,23 @@ T["interactive_command"]["approves execution and input and releases a running co
     end
     local started = _G.call_interactive_command({ action = "start", command = "read answer; sleep 30" })
     _G.job_id = tonumber(started:match("Started command (%d+)"))
+    _G.process_id = vim.fn.jobpid(_G.job_id)
     _G.terminal_buffer = tonumber(started:match("terminal buffer (%d+)"))
     _G.call_interactive_command({ action = "send", job_id = _G.job_id, input = "hello\n" })
     _G.call_interactive_command({ action = "read", job_id = _G.job_id })
     _G.released = _G.call_interactive_command({ action = "release", job_id = _G.job_id })
-    vim.wait(3000, function()
-      return vim.fn.jobwait({ _G.job_id }, 0)[1] ~= -1
+  ]])
+
+  -- Let terminal teardown finish before waiting in another RPC request.
+  child.lua([[
+    _G.process_stopped = vim.wait(3000, function()
+      return vim.uv.kill(_G.process_id, 0) == nil
     end, 20)
   ]])
 
   h.eq(2, child.lua_get("_G.approval_count"))
   h.expect_contains("Released command", child.lua_get("_G.released"))
-  h.eq(false, child.lua_get("vim.fn.jobwait({ _G.job_id }, 0)[1] == -1"))
+  h.eq(true, child.lua_get("_G.process_stopped"))
   h.eq(false, child.lua_get("vim.api.nvim_buf_is_valid(_G.terminal_buffer)"))
 end
 
